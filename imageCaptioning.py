@@ -26,6 +26,8 @@ from keras.layers import Dense
 from keras.layers import LSTM
 from keras.layers import Embedding
 from keras.layers import Dropout
+from keras.optimizers import Adam
+from keras.layers import Bidirectional
 from keras.layers.merge import add
 from keras.callbacks import ModelCheckpoint
 import string
@@ -42,7 +44,10 @@ from pickle import load
 from keras.preprocessing.text import Tokenizer
 from keras.preprocessing.sequence import pad_sequences
 from keras.models import load_model
-from nltk.translate.bleu_score import corpus_bleu
+from keras.models import save_model
+from keras import backend as K
+
+#from nltk.translate.bleu_score import corpus_bleu
 
 
 def extract_features(directory):
@@ -71,12 +76,25 @@ def extract_features(directory):
         print('>%s' % name)
     return features
 
-# extract features from all images
-directory = '/Users/pranavsharma/Developer/Work/deep-learning/image-captioning/Flicker8k_Dataset'
-features = extract_features(directory)
-print('Extracted Features: %d' % len(features))
-# save to file
-dump(features, open('features.pkl', 'wb'))
+
+
+
+
+
+# =============================================================================
+# # extract features from all images
+# directory = '/Users/pranavsharma/Developer/Work/deep-learning/image-captioning/Flicker8k_Dataset'
+# features = extract_features(directory)
+# print('Extracted Features: %d' % len(features))
+# # save to file
+# dump(features, open('features.pkl', 'wb'))
+# =============================================================================
+
+
+
+
+
+
 
 def load_doc(filename):
     file = open(filename, 'r')
@@ -84,7 +102,7 @@ def load_doc(filename):
     file.close()
     return text
 
-filename = '/Users/pranavsharma/Developer/Work/deep-learning/image-captioning/Flickr8k_text/Flickr8k.token.txt'
+filename = 'Flickr8k_text/Flickr8k.token.txt'
 doc = load_doc(filename)
 
 def load_descriptions(doc):
@@ -118,24 +136,37 @@ def clean_descriptions(descriptions):
             
 clean_descriptions(descriptions)
 
-file = open('glove.6B.300d.txt', 'r')
-text = file.read()
-file.close()
-embeddings = dict()
-for line in text.split('\n'):
-    if line != '':
-        word = line.split()[0]
-        embeddings[word] = np.asarray(line.split()[1:])
+# =============================================================================
+# file = open('glove.6B.300d.txt', 'r')
+# text = file.read()
+# file.close()
+# embeddings = dict()
+# for line in text.split('\n'):
+#     if line != '':
+#         word = line.split()[0]
+#         embeddings[word] = np.asarray(line.split()[1:])
+# 
+# sos = np.zeros((300,))
+# sos[0] = 1
+# eos = np.zeros((300,))
+# eos[1] = 1
+# unk = np.zeros((300,))
+# unk[2] = 1
+# embeddings['SOS'] = sos
+# embeddings['EOS'] = eos
+# embeddings['UNK'] = unk
+# 
+# embeddings_all = copy.deepcopy(embeddings)
+# 
+# embeddings = dict()
+# for key, emb in embeddings_all.items():
+#     if key in vocabulary:
+#         embeddings[key] = emb
+# 
+# dump(embeddings, open('embeddings.pkl', 'wb'))    
+# =============================================================================
 
-sos = np.zeros((300,))
-sos[0] = 1
-eos = np.zeros((300,))
-eos[1] = 1
-unk = np.zeros((300,))
-unk[2] = 1
-embeddings['SOS'] = sos
-embeddings['EOS'] = eos
-embeddings['UNK'] = unk
+embeddings = load(open('embeddings.pkl', 'rb'))
 
 def replace_unknown_words(descriptions):
     for key in descriptions.keys():
@@ -285,31 +316,30 @@ def max_length(descriptions):
 
 def define_model(vocab_size, max_length, embedding_matrix):
     inputs1 = Input(shape=(1536,))
-    fe1 = Dropout(0.5)(inputs1)
-    fe2 = Dense(256, activation='relu')(fe1)
+    fe1 = Dense(256, activation='relu')(inputs1)
+    
+    c1 = Input(shape=(256,))
     
     inputs2 = Input(shape=(max_length,))
-    se1 = Embedding(input_dim=embedding_matrix.shape[0],
-                    output_dim=embedding_matrix.shape[1],
-                    mask_zero=True,
-                    weights=[embedding_matrix],
-                    trainable=False)(inputs2)
-    se2 = Dropout(0.5)(se1)
-    se3 = LSTM(256, return_sequences=True)(se2)
-    se4 = Dropout(0.5)(se3)
-    se5 = LSTM(256)(se4)
+    emb_layer = Embedding(embedding_matrix.shape[0], embedding_matrix.shape[1], trainable=False)
+    emb_layer.build((None,))
+    emb_layer.set_weights([embedding_matrix])
+    se1 = emb_layer(inputs2)
+    se2 = LSTM(256, return_sequences=True)(se1, initial_state=[fe1, c1])
+    se3 = Dropout(0.5)(se2)
+    se4 = Bidirectional(LSTM(256))(se3)
+    se5 = Dropout(0.5)(se4)
     
-    decoder1 = add([fe2, se5])
-    decoder2 = Dense(256, activation='relu')(decoder1)
-    outputs = Dense(vocab_size, activation='softmax')(decoder2)
-    model = Model(inputs=[inputs1, inputs2], outputs=outputs)
-    model.compile(loss='categorical_crossentropy', optimizer='adam')
+    outputs = Dense(vocab_size, activation='softmax')(se5)
+    model = Model(inputs=[inputs1, c1, inputs2], outputs=outputs)
+    optimizer = Adam(lr=0.0001, decay=0.01)
+    model.compile(loss='categorical_crossentropy', optimizer=optimizer)
     print(model.summary())
 #    plot_model(model, to_file='model.png', show_shapes=True)
     return model
 
 # train dataset
- 
+
 # load training dataset (6K)
 filename = 'Flickr8k_text/Flickr_8k.trainImages.txt'
 train = load_set(filename)
@@ -321,7 +351,9 @@ print('Descriptions: train=%d' % len(train_descriptions))
 train_features = load_photo_features('features.pkl', train)
 print('Photos: train=%d' % len(train_features))
 # prepare tokenizer
-tokenizer = create_tokenizer(train_descriptions)
+temp_descriptions = copy.deepcopy(descriptions)
+temp_descriptions['1000268201_693b08cb0e'][0] = 'SOS EOS ' + temp_descriptions['1000268201_693b08cb0e'][0]
+tokenizer = create_tokenizer(temp_descriptions)
 vocab_size = len(tokenizer.word_index) + 1
 print('Vocabulary Size: %d' % vocab_size)
 word_to_index = tokenizer.word_index
@@ -333,128 +365,139 @@ print('Description Length: %d' % max_length)
 # prepare sequences
 X1train, X2train, ytrain = create_sequences(tokenizer, max_length, train_descriptions, train_features)
 
-# dev dataset
+c_initial = np.zeros((X1train.shape[0], 256))
 
-# load test set
-filename = 'Flickr8k_text/Flickr_8k.devImages.txt'
-test = load_set(filename)
-print('Dataset: %d' % len(test))
-# descriptions
-test_descriptions = load_clean_descriptions('descriptions.txt', test)
-print('Descriptions: test=%d' % len(test_descriptions))
-# photo features
-test_features = load_photo_features('features.pkl', test)
-print('Photos: test=%d' % len(test_features))
-# prepare sequences
-X1test, X2test, ytest = create_sequences(tokenizer, max_length, test_descriptions, test_features)
+# =============================================================================
+# # dev dataset
+# 
+# # load test set
+# filename = 'Flickr8k_text/Flickr_8k.devImages.txt'
+# test = load_set(filename)
+# print('Dataset: %d' % len(test))
+# # descriptions
+# test_descriptions = load_clean_descriptions('descriptions.txt', test)
+# print('Descriptions: test=%d' % len(test_descriptions))
+# # photo features
+# test_features = load_photo_features('features.pkl', test)
+# print('Photos: test=%d' % len(test_features))
+# # prepare sequences
+# X1test, X2test, ytest = create_sequences(tokenizer, max_length, test_descriptions, test_features)
+# =============================================================================
 
 # fit model
 
 # define the model
 model = define_model(vocab_size, max_length, embedding_matrix)
 # define checkpoint callback
-filepath = 'model-ep{epoch:03d}-loss{loss:.3f}-val_loss{val_loss:.3f}.h5'
-checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=True, mode='min')
+#filepath = 'model-ep{epoch:03d}-loss{loss:.3f}-val_loss{val_loss:.3f}.h5'
+#checkpoint = ModelCheckpoint(filepath, monitor='loss', verbose=1, save_best_only=True, mode='min')
+
 # fit model
-model.fit([X1train, X2train], ytrain, epochs=20, verbose=2, callbacks=[checkpoint], validation_data=([X1test, X2test], ytest))
+model.fit([X1train, c_initial, X2train], ytrain, epochs=7, verbose=2, batch_size=128)
 
-def word_for_id(integer, tokenizer):
-    for word, index in tokenizer.word_index.items():
-        if index == integer:
-            return word
-    return None
+model.save('final_model.h5')
 
-def generate_desc(model, tokenizer, photo, max_length):
-    in_text = 'SOS'
-    for i in range(max_length):
-        sequence = tokenizer.texts_to_sequences([in_text])[0]
-        sequence = pad_sequences([sequence], maxlen = max_length)
-        yhat = model.predict([photo, sequence], verbose=0)
-        yhat = argmax(yhat)
-        word = word_for_id(yhat, tokenizer)
-        if word is None:
-            break
-        in_text += ' ' + word
-        if word == 'EOS':
-            break
-    return in_text
-        
-def evaluate_model(model, descriptions, photos, tokenizer, max_length):
-    actual, predicted = list(), list()
-    for key, desc_list in descriptions.items():
-        yhat = generate_desc(model, tokenizer, photos[key], max_length)
-        references = [d.split() for d in desc_list]
-        actual.append(references)
-        predicted.append(yhat.split())
-    print('BLEU-1: %f' % corpus_bleu(actual, predicted, weights=(1.0, 0, 0, 0)))
-    print('BLEU-2: %f' % corpus_bleu(actual, predicted, weights=(0.5, 0.5, 0, 0)))
-    print('BLEU-3: %f' % corpus_bleu(actual, predicted, weights=(0.3, 0.3, 0.3, 0)))
-    print('BLEU-4: %f' % corpus_bleu(actual, predicted, weights=(0.25, 0.25, 0.25, 0.25)))  
-    
-# prepare tokenizer on train set
 
-# load training dataset (6K)
-filename = 'Flickr8k_text/Flickr_8k.trainImages.txt'
-train = load_set(filename)
-print('Dataset: %d' % len(train))
-# descriptions
-train_descriptions = load_clean_descriptions('descriptions.txt', train)
-print('Descriptions: train=%d' % len(train_descriptions))
-# prepare tokenizer
-tokenizer = create_tokenizer(train_descriptions)
-vocab_size = len(tokenizer.word_index) + 1
-print('Vocabulary Size: %d' % vocab_size)
-# determine the maximum sequence length
-max_length = max_length(train_descriptions)
-print('Description Length: %d' % max_length)
-dump(tokenizer, open('tokenizer.pkl', 'wb'))
-# prepare test set
 
-# load test set
-filename = 'Flickr8k_text/Flickr_8k.testImages.txt'
-test = load_set(filename)
-print('Dataset: %d' % len(test))
-# descriptions
-test_descriptions = load_clean_descriptions('descriptions.txt', test)
-print('Descriptions: test=%d' % len(test_descriptions))
-# photo features
-test_features = load_photo_features('features.pkl', test)
-print('Photos: test=%d' % len(test_features))
-
-# load the model
-filename = 'model-ep005-loss3.540-val_loss3.735.h5'
-model = load_model(filename)
-# evaluate model
-evaluate_model(model, test_descriptions, test_features, tokenizer, max_length)
-    
-tokenizer = load(open('tokenizer.pkl', 'rb'))
-max_length = 34
-
-# load the model
-model = load_model('model-ep005-loss3.540-val_loss3.735.h5')
-
-def extract_features(filename):
-    model = InceptionResNetV2()
-    model.layers.pop()
-    model = Model(inputs=model.inputs, outputs=model.layers[-1].output)
-
-	# load an image from file
-    image = load_img(filename, target_size=(299, 299))
-    # convert the image pixels to a numpy array
-    image = img_to_array(image)
-    # reshape data for the model
-    image = image.reshape((1, image.shape[0], image.shape[1], image.shape[2]))
-    # prepare the image for the InceptionResNetV2 model
-    image = preprocess_input(image)
-    # get features
-    feature = model.predict(image, verbose=0)
-    return feature
-
-# load and prepare the photograph
-photo = extract_features('example.jpg')
-# generate description
-description = generate_desc(model, tokenizer, photo, max_length)
-print(description)
+# =============================================================================
+# def word_for_id(integer, tokenizer):
+#     for word, index in tokenizer.word_index.items():
+#         if index == integer:
+#             return word
+#     return None
+# 
+# def generate_desc(model, tokenizer, photo, max_length):
+#     in_text = 'SOS'
+#     for i in range(max_length):
+#         sequence = tokenizer.texts_to_sequences([in_text])[0]
+#         sequence = pad_sequences([sequence], maxlen = max_length)
+#         yhat = model.predict([photo, sequence], verbose=0)
+#         yhat = argmax(yhat)
+#         word = word_for_id(yhat, tokenizer)
+#         if word is None:
+#             break
+#         in_text += ' ' + word
+#         if word == 'EOS':
+#             break
+#     return in_text
+#         
+# def evaluate_model(model, descriptions, photos, tokenizer, max_length):
+#     actual, predicted = list(), list()
+#     for key, desc_list in descriptions.items():
+#         yhat = generate_desc(model, tokenizer, photos[key], max_length)
+#         references = [d.split() for d in desc_list]
+#         actual.append(references)
+#         predicted.append(yhat.split())
+#     print('BLEU-1: %f' % corpus_bleu(actual, predicted, weights=(1.0, 0, 0, 0)))
+#     print('BLEU-2: %f' % corpus_bleu(actual, predicted, weights=(0.5, 0.5, 0, 0)))
+#     print('BLEU-3: %f' % corpus_bleu(actual, predicted, weights=(0.3, 0.3, 0.3, 0)))
+#     print('BLEU-4: %f' % corpus_bleu(actual, predicted, weights=(0.25, 0.25, 0.25, 0.25)))  
+#     
+# # prepare tokenizer on train set
+# 
+# # load training dataset (6K)
+# filename = 'Flickr8k_text/Flickr_8k.trainImages.txt'
+# train = load_set(filename)
+# print('Dataset: %d' % len(train))
+# # descriptions
+# train_descriptions = load_clean_descriptions('descriptions.txt', train)
+# print('Descriptions: train=%d' % len(train_descriptions))
+# # prepare tokenizer
+# tokenizer = create_tokenizer(train_descriptions)
+# vocab_size = len(tokenizer.word_index) + 1
+# print('Vocabulary Size: %d' % vocab_size)
+# # determine the maximum sequence length
+# max_length = max_length(train_descriptions)
+# print('Description Length: %d' % max_length)
+# dump(tokenizer, open('tokenizer.pkl', 'wb'))
+# # prepare test set
+# 
+# # load test set
+# filename = 'Flickr8k_text/Flickr_8k.testImages.txt'
+# test = load_set(filename)
+# print('Dataset: %d' % len(test))
+# # descriptions
+# test_descriptions = load_clean_descriptions('descriptions.txt', test)
+# print('Descriptions: test=%d' % len(test_descriptions))
+# # photo features
+# test_features = load_photo_features('features.pkl', test)
+# print('Photos: test=%d' % len(test_features))
+# 
+# # load the model
+# filename = 'model-ep005-loss3.540-val_loss3.735.h5'
+# model = load_model(filename)
+# # evaluate model
+# evaluate_model(model, test_descriptions, test_features, tokenizer, max_length)
+#     
+# tokenizer = load(open('tokenizer.pkl', 'rb'))
+# max_length = 34
+# 
+# # load the model
+# model = load_model('model-ep005-loss3.540-val_loss3.735.h5')
+# 
+# def extract_features(filename):
+#     model = InceptionResNetV2()
+#     model.layers.pop()
+#     model = Model(inputs=model.inputs, outputs=model.layers[-1].output)
+# 
+# 	# load an image from file
+#     image = load_img(filename, target_size=(299, 299))
+#     # convert the image pixels to a numpy array
+#     image = img_to_array(image)
+#     # reshape data for the model
+#     image = image.reshape((1, image.shape[0], image.shape[1], image.shape[2]))
+#     # prepare the image for the InceptionResNetV2 model
+#     image = preprocess_input(image)
+#     # get features
+#     feature = model.predict(image, verbose=0)
+#     return feature
+# 
+# # load and prepare the photograph
+# photo = extract_features('example.jpg')
+# # generate description
+# description = generate_desc(model, tokenizer, photo, max_length)
+# print(description)
+# =============================================================================
 
 
 
